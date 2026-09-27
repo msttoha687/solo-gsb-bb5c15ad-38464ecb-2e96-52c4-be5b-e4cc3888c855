@@ -4,6 +4,13 @@
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
+  clockNow: $('#clock-now'),
+  clockAdvanced: $('#clock-advanced'),
+  clockSeconds: $('#clock-seconds'),
+  clockAdvanceBtn: $('#clock-advance-btn'),
+  clockQuickBtns: document.querySelectorAll('.clock-quick-btn'),
+  clockResult: $('#clock-result'),
+
   storeUrl: $('#store-url'),
   storeTopUrl: $('#store-top-url'),
   storeCookie: $('#store-cookie'),
@@ -96,6 +103,66 @@ async function copyText(text) {
   }
 }
 
+/* ---------- 演算时钟（可控时间轴） ---------- */
+
+function renderClock(clock) {
+  if (!clock) return;
+  els.clockNow.textContent = clock.now;
+  els.clockNow.title = `演算起点：${clock.epoch}（服务启动或上次重置时固定）`;
+  els.clockAdvanced.textContent = String(clock.advancedSeconds);
+}
+
+async function refreshClock() {
+  const resp = await fetch('/api/clock');
+  const data = await resp.json();
+  renderClock(data.clock);
+}
+
+function renderClockError(message) {
+  els.clockResult.classList.remove('hidden');
+  els.clockResult.innerHTML =
+    `<div class="banner bad"><span class="banner-title">⛔ 无法推进</span>${escapeHtml(message)}</div>`;
+}
+
+async function advanceClock(secondsRaw) {
+  const raw = String(secondsRaw).trim();
+  // 界面先做一次正整数校验；服务端仍会独立校验（非法不改变时间与罐）
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    renderClockError('推进秒数必须是不小于 1 的正整数；演算时间与 Cookie 罐均未改动');
+    return;
+  }
+  const seconds = Number(raw);
+  els.clockAdvanceBtn.disabled = true;
+  els.clockQuickBtns.forEach((b) => { b.disabled = true; });
+  try {
+    const data = await postJSON('/api/clock/advance', { seconds });
+    renderClock(data.clock);
+    // 推进不删条目：直接用响应中的罐快照重绘（过期项标灰但保留）
+    if (data.cookies) renderJar(data.cookies);
+    if (data.capacity) renderCapacityUsage(data.capacity);
+    els.clockResult.classList.remove('hidden');
+    els.clockResult.innerHTML =
+      `<div class="banner ok"><span class="banner-title">✅ 已推进 ${seconds} 秒</span>` +
+      `当前演算时间 <strong>${escapeHtml(data.clock.now)}</strong>（累计推进 ${data.clock.advancedSeconds} 秒）；` +
+      `推进不删除条目，过期项在下次匹配或容量淘汰时再处理</div>`;
+    els.clockSeconds.value = '';
+  } catch (err) {
+    renderClockError(err instanceof Error ? err.message : String(err));
+    refreshClock().catch((e) => console.error(e));
+  } finally {
+    els.clockAdvanceBtn.disabled = false;
+    els.clockQuickBtns.forEach((b) => { b.disabled = false; });
+  }
+}
+
+els.clockAdvanceBtn.addEventListener('click', () => advanceClock(els.clockSeconds.value));
+els.clockSeconds.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') advanceClock(els.clockSeconds.value);
+});
+els.clockQuickBtns.forEach((btn) => {
+  btn.addEventListener('click', () => advanceClock(btn.dataset.seconds));
+});
+
 /* ---------- Cookie 罐表格 ---------- */
 
 function sameSiteBadge(c) {
@@ -179,6 +246,7 @@ function renderJar(cookies) {
 async function refreshJar() {
   const resp = await fetch('/api/jar');
   const data = await resp.json();
+  renderClock(data.clock);
   renderJar(data.cookies || []);
   if (data.capacity) {
     renderCapacityUsage(data.capacity);
@@ -506,6 +574,7 @@ els.sendBtn.addEventListener('click', async () => {
 els.resetBtn.addEventListener('click', async () => {
   try {
     const data = await postJSON('/api/reset', {});
+    renderClock(data.clock);
     renderJar([]);
     if (data.capacity) renderCapacityUsage(data.capacity);
     els.storeResult.classList.add('hidden');
@@ -513,8 +582,9 @@ els.resetBtn.addEventListener('click', async () => {
     els.capResult.classList.add('hidden');
     els.scriptReadResult.classList.add('hidden');
     els.scriptWriteResult.classList.add('hidden');
+    els.clockResult.classList.add('hidden');
     els.storeCookie.value = '';
-    toast('Cookie 罐已重置（容量设置保留）');
+    toast('Cookie 罐与演算时钟已重置（容量设置保留）');
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err));
   }

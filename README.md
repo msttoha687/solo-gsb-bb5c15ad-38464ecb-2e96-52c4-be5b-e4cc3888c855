@@ -36,6 +36,16 @@ Partitioned 分区项仍按既有 Secure 与分区键规则正常入罐；**跨�
 - **网络接口 `/api/store`、`/api/send` 行为不变**：仍可写入、更新、删除并在请求头中
   发送 HttpOnly 项（HttpOnly 只阻挡页面脚本，不阻挡网络栈）。
 
+另有 **🕰️ 可控时间轴（演算时钟）**：服务启动时把当前时间固定为演算起点，之后时钟静止，
+只能在 Web 右栏「演算时钟」面板（或 `POST /api/clock/advance`）按**正整数秒**整体向前推进。
+**网络写入与发送、`document.cookie` 读写、罐快照（过期标记 / 剩余时间）与容量淘汰
+（过期清理、最近访问时间 LRA）统一使用该时间**，因此 `Max-Age` 过期、
+**默认 Lax 的 120 秒跨站顶层 POST 宽限**与容量淘汰中的过期清理都可以逐步复现；
+**推进本身不删除任何条目**——过期项仍保留在罐中并标灰，到下次发送 / `document.cookie`
+读取（排除）或容量淘汰（超限时先物理清理过期项）再按既有规则处理。非法秒数（0、负数、
+小数、非数字、缺字段等）返回 400，**时间与罐均不变**。**重置罐时同步重置时钟**
+（以重置时刻为新起点；容量设置保留）。
+
 技术栈：**TypeScript + Express + 原生 HTML/CSS/JS**（前端无框架、无构建），数据仅存内存；
 same-site 判定使用 [tldts](https://github.com/remusao/tldts)（内置公共后缀列表 PSL，含私有域段）。
 
@@ -56,9 +66,15 @@ docker compose up --build -d
 
 > **http://localhost:3000**
 
-- Web 界面与全部 API（`/api/store`、`/api/send` 等）都在 **同一端口 localhost:3000** 提供；
+- Web 界面（右栏含「🕰️ 演算时钟」面板）与全部 API（`/api/clock`、`/api/store`、
+  `/api/send` 等）都在 **同一地址 localhost:3000** 提供；
 - 容器内服务端口：**3000**；
 - 宿主机默认映射端口：**3000**（想换端口改 `docker-compose.yml` 左侧，如 `"3001:3000"`）。
+
+必要配置：**无**——镜像内已内置 `PORT=3000`，开箱即用；唯一可选配置是环境变量 `PORT`
+（容器监听端口，通常无需修改；改了容器端口需同步调整端口映射，例如
+`"3000:8080"` 配合 `PORT=8080`）。服务**不依赖数据库或外部服务**，Cookie 罐与演算时钟
+都只存于进程内存。
 
 常用命令：
 
@@ -98,13 +114,19 @@ docker compose up --build -d    # 改完代码后重新构建并启动
    - 📤 **发送项**：命中的主机 / Path / Secure / SameSite / 分区键匹配点
    - 🚫 **排除项**：过期、Domain 不匹配、Path 不匹配、Secure 受限、SameSite 拦截、
      **分区键不符（Partitioned）**、**第三方屏蔽（跨站普通 Cookie）**等逐项原因
-3. **🫙 当前 Cookie 罐**：右侧表格实时展示全部条目（域、作用域、Path、**分区键**、Secure、
-   Priority、有效期剩余、创建序号、**最近访问时间**）；点击 **重置** 清空内存罐。
-4. **🎚️ 容量压力模拟**（右栏顶部）：设置**全局容量**与**每个可注册域的容量**（按条目条数，
+3. **🕰️ 演算时钟（可控时间轴）**（右栏最上方）：面板显示**当前演算时间**与累计推进秒数；
+   在输入框填**正整数秒**点 **推进**（或用 `+1s / +60s / +120s / +1h / +1d` 快捷按钮）。
+   服务启动时时间固定，写入 / 发送、`document.cookie` 读写、罐快照与容量淘汰统一使用它；
+   推进后过期项在表格中标灰但**仍保留**，下次匹配或容量淘汰再按既有规则处理。
+   非法输入（0、负数、小数等）会被拒绝，时间与罐都不变。
+4. **🫙 当前 Cookie 罐**：右侧表格实时展示全部条目（域、作用域、Path、**分区键**、Secure、
+   Priority、有效期剩余、创建序号、**最近访问时间**）；点击 **重置** 清空内存罐
+   **并同步重置演算时钟**。
+5. **🎚️ 容量压力模拟**（右栏顶部）：设置**全局容量**与**每个可注册域的容量**（按条目条数，
    留空 = 不限），点击 **应用容量设置** 立即按新上限执行一次淘汰；之后每次入罐通过校验都会
    自动依次执行域级、全局淘汰。面板中实时显示全局与各域用量（`当前条数/上限`），
    入罐结果区会展示**本次触发的淘汰清单**（过期清理 / 容量淘汰、逐条排序依据）。
-5. **📜 document.cookie 脚本演算**（右栏中部，模拟页面 JS）：
+6. **📜 document.cookie 脚本演算**（右栏中部，模拟页面 JS）：
    - 填**页面 URL**（执行脚本的文档地址）与**顶层页面 URL**（留空 = 同站 / 同分区），
      可勾选**屏蔽第三方 Cookie**（开启后顶层页必填，跨站页面读不到普通 Cookie）；
    - 点击 **读取 document.cookie**：查看脚本读到的字符串（可一键复制）、页面站 / 顶层站、
@@ -198,6 +220,24 @@ Partitioned（CHIPS）演算示例（写入时填「顶层页面 URL」，发送
 
 ## 📐 实现的演算规则
 
+### 可控时间轴（演算时钟；所有规则共用一个「现在」）
+
+- **服务启动时固定**：以进程启动的真实时间为演算起点（`epochMs`），之后时钟静止，
+  只能经 `POST /api/clock/advance`（或右栏面板）按**正整数秒**整体向前推进（只增不减）；
+- **统一时钟**：网络写入（`/api/store`，`createdAt` / `updatedAt` / `lastAccessedAt` /
+  `Max-Age` 绝对过期时间）、请求发送（`/api/send`，过期判断、**默认 Lax 120 秒跨站顶层
+  POST 宽限**、发送成功刷新最近访问时间）、`document.cookie` 读写（`/api/script/read`、
+  `/api/script/write`）、罐快照（`GET /api/jar` 的 `expired` / `remaining`）与容量淘汰
+  （`/api/capacity` 及入罐后的过期物理清理、LRA 排序）**一律取演算时钟**，不再各自读系统
+  墙钟——因此时间相关行为都可逐步、可复现地演示；
+- **推进不删除条目**：推进只改变「现在」。已过期项仍保留在罐快照中并标记 `expired`
+  （界面标灰），到**下次匹配**（`/api/send`、`/api/script/read` 逐项排除）或**容量淘汰**
+  （范围内超限时先物理清理过期项）再按既有规则处理；
+- **非法输入不改状态**：`seconds` 必须是 JSON 数字且为不小于 1 的整数；0、负数、小数、
+  数字字符串、`null`、布尔、对象、数组、缺字段等一律返回 **400**，演算时间与罐内容都不变；
+- **重置罐同步重置时钟**：`POST /api/reset` 清空内存罐，并以重置时刻的真实时间作为新的
+  演算起点（累计推进量归零）；容量设置保留。
+
 ### 写入（处理 Set-Cookie）
 
 - **Domain**
@@ -265,9 +305,9 @@ Partitioned（CHIPS）演算示例（写入时填「顶层页面 URL」，发送
 请求站与顶层站一致即「同站」，否则「跨站」（`http://example.com` 与
 `https://example.com` 因 scheme 不同也算跨站）。
 
-逐条检查（顺序与 RFC 6265 一致）：
+逐条检查（顺序与 RFC 6265 一致；所有时间判断都取演算时钟）：
 
-1. **过期检查**：已过期不发送（罐中保留并标灰显示）；
+1. **过期检查**：已过期不发送（推进时钟不会删除条目，罐中保留并标灰显示，到匹配时排除）；
 2. **分区检查（Partitioned / CHIPS）**：请求分区键由顶层页面 URL（缺省取请求 URL）按
    scheme + 可注册域计算；**分区项只在自身分区键与请求分区键完全相同时继续后续检查**，
    键不同直接排除并在明细给出两个键；普通（未分区）项不参与分区隔离，照常检查；
@@ -329,13 +369,15 @@ updatedAt / lastAccessedAt）与容量状态保持不变**，也不触发容量�
 
 | 方法 | 路径 | Body（JSON） | 说明 |
 |------|------|--------------|------|
-| GET | `/api/jar` | — | 当前罐快照（`cookies` + `capacity`：容量设置与各可注册域用量） |
-| POST | `/api/store` | `{ "url": "...", "setCookie": "...", "topUrl"?: "...", "blockThirdParty"?: false }` | 顺序写入一条 Set-Cookie；`topUrl` 为顶层页面 URL，仅 `Partitioned` cookie 必需（计算分区键），普通 cookie 可省略。`blockThirdParty=true` 开启屏蔽第三方 Cookie：此时 `topUrl` 必填且须有效，跨站响应拒绝写入/删除普通 Cookie（不改动罐、不触发容量淘汰），Partitioned 分区项不受影响。响应含 `eviction`（本次触发的域级/全局淘汰清单与排序依据，无限额时为 `null`） |
+| GET | `/api/jar` | — | 当前罐快照（`clock`：演算时钟 + `cookies` + `capacity`：容量设置与各可注册域用量） |
+| GET | `/api/clock` | — | 读取可控时间轴（演算时钟）快照：`now`/`nowMs`（当前演算时间）、`epoch`/`epochMs`（服务启动或上次重置时固定的起点）、`advancedSeconds`（累计推进秒数） |
+| POST | `/api/clock/advance` | `{ "seconds": 60 }` | 把演算时钟向前推进**正整数秒**；只接受 JSON 数字（数字字符串、0、负数、小数、`null`、布尔、缺字段等一律 **400**，时间与罐均不变）。推进**不删除条目**，过期项到下次匹配或容量淘汰再处理。响应含推进后的 `clock`、最新 `cookies`（过期项标 `expired` 但保留）与 `capacity` |
+| POST | `/api/store` | `{ "url": "...", "setCookie": "...", "topUrl"?: "...", "blockThirdParty"?: false }` | 顺序写入一条 Set-Cookie（时间取演算时钟）；`topUrl` 为顶层页面 URL，仅 `Partitioned` cookie 必需（计算分区键），普通 cookie 可省略。`blockThirdParty=true` 开启屏蔽第三方 Cookie：此时 `topUrl` 必填且须有效，跨站响应拒绝写入/删除普通 Cookie（不改动罐、不触发容量淘汰），Partitioned 分区项不受影响。响应含 `eviction`（本次触发的域级/全局淘汰清单与排序依据，无限额时为 `null`） |
 | POST | `/api/send` | `{ "url": "...", "topUrl"?: "...", "method"?: "GET", "topLevelNav"?: true, "blockThirdParty"?: false }` | 演算 Cookie 头与逐项原因；请求分区键由顶层页面 URL（缺省取请求 URL）计算并以 `partitionKey` 返回，仅键相同的 `Partitioned` 项发送。`blockThirdParty=true` 时 `topUrl` 必填且须有效，跨站请求排除普通 Cookie（不刷新其最近访问时间），分区键匹配的 Partitioned 项仍可发送；响应以 `blockThirdParty` 回显开关状态。**HttpOnly 项照常发送**。发送成功的条目刷新最近访问时间，响应附最新 `cookies` 与 `capacity` |
 | POST | `/api/script/read` | `{ "url": "...", "topUrl"?: "...", "blockThirdParty"?: false }` | **document.cookie 读取演算（页面 JS 视角）**：按既有 过期/分区/第三方屏蔽/Domain/Path/Secure 顺序筛选，**最后再排除 HttpOnly**；**不应用 SameSite、不刷新最近访问时间、不改动罐**。可读项沿用请求头排序（Path 长度降序、创建序号升序），以 `cookieString`（`; ` 拼接）返回，并在 `readable` / `excluded` 中逐项说明原因；上下文字段同 `/api/send`（页面站、顶层站、`partitionKey`、开关回显） |
 | POST | `/api/script/write` | `{ "url": "...", "setCookie": "...", "topUrl"?: "...", "blockThirdParty"?: false }` | **document.cookie 赋值演算**：复用 `/api/store` 的解析、分区身份与容量逻辑，但**拒绝带 HttpOnly 的赋值**，并**拒绝覆盖或以 `Max-Age<=0` 删除同身份（name、domain、path、分区键）且未过期的 HttpOnly 项**（已过期的不在保护之列）；脚本专属拒绝在改动罐前返回，**罐内容、时间戳与容量不变**。响应结构同 `/api/store`（`action`/`reason`/`jar`/`eviction`） |
 | POST | `/api/capacity` | `{ "globalLimit"?: number \| null, "domainLimits"?: { "example.com": 3 } }` | 替换式设置全局 / 每可注册域容量（正整数；`null`/缺省 = 不限），立即执行一轮淘汰并返回报告 |
-| POST | `/api/reset` | — | 清空内存罐（**容量设置保留**） |
+| POST | `/api/reset` | — | 清空内存罐**并同步重置演算时钟**（以重置时刻为新起点）；**容量设置保留**，响应含重置后的 `clock` |
 
 curl 示例：
 
@@ -387,7 +429,15 @@ curl -s -X POST http://localhost:3000/api/capacity \
 curl -s -X POST http://localhost:3000/api/capacity \
   -H 'Content-Type: application/json' -d '{"globalLimit":null,"domainLimits":{}}'
 
-# 重置（罐清空，容量设置保留）
+# 读取演算时钟（当前演算时间 / 起点 / 累计推进秒数）
+curl -s http://localhost:3000/api/clock
+
+# 把演算时钟向前推进 120 秒（只接受正整数；非法输入 400 且时间与罐不变，
+# 推进本身不删条目，响应附最新 cookies：过期项标 expired 但保留）
+curl -s -X POST http://localhost:3000/api/clock/advance \
+  -H 'Content-Type: application/json' -d '{"seconds":120}'
+
+# 重置（罐清空、演算时钟同步重置，容量设置保留）
 curl -s -X POST http://localhost:3000/api/reset
 
 # document.cookie 读取：HttpOnly 项不在 cookieString 中（不应用 SameSite、不刷新访问时间）
@@ -431,10 +481,10 @@ curl -s -X POST http://localhost:3000/api/script/write \
 ├── package.json
 ├── tsconfig.json
 ├── src
-│   ├── server.ts           # Express 入口与 API（含容量设置、document.cookie 脚本读写接口）
-│   └── cookieJar.ts        # 全部 Cookie 演算规则（解析/入罐/匹配/排序/SameSite/Priority/Partitioned/容量淘汰/document.cookie 脚本视角）
+│   ├── server.ts           # Express 入口与 API（含演算时钟读写/推进、容量设置、document.cookie 脚本读写接口）
+│   └── cookieJar.ts        # 全部 Cookie 演算规则（可控时间轴/解析/入罐/匹配/排序/SameSite/Priority/Partitioned/容量淘汰/document.cookie 脚本视角）
 └── public
-    ├── index.html          # 原生前端页面（含顶层 URL 输入、容量压力配置与 document.cookie 演算面板）
+    ├── index.html          # 原生前端页面（含演算时钟面板、顶层 URL 输入、容量压力配置与 document.cookie 演算面板）
     ├── styles.css
     └── app.js
 ```
@@ -464,6 +514,9 @@ npm run dev
 > 不应用 SameSite 且不刷新最近访问时间，写入时拒绝声明 HttpOnly、也拒绝覆盖或
 > `Max-Age<=0` 删除同身份未过期的 HttpOnly 项（拒绝时罐内容、时间戳与容量不变）。
 > 不处理 Expires、单条 cookie 字节大小上限等。
+> **演算时钟**为可控时间轴：服务启动时固定时间，只能按正整数秒推进（`GET /api/clock`、
+> `POST /api/clock/advance`），写入 / 发送、`document.cookie` 读写、罐快照与容量淘汰统一
+> 使用该时间；推进不删条目，下次匹配或淘汰再按既有规则处理；重置罐时同步重置时钟。
 > 分区键与站点一致，取**顶层 URL 的 scheme + 可注册域**（IP、localhost 用完整主机）；
 > **屏蔽第三方 Cookie** 为可选模式（默认关闭）：开启后跨站响应拒绝写入/删除普通
 > Cookie、跨站请求排除普通 Cookie，Partitioned 分区项均不受此限。

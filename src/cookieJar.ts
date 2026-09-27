@@ -3,6 +3,16 @@
  *
  * 内存 Cookie 罐的全部演算逻辑，规则对齐 RFC 6265（HTTP State Management Mechanism）：
  *
+ *  可控时间轴（演算时钟；所有规则共用同一个「现在」）：
+ *   - 服务启动（构造 CookieJar）时固定一个演算起点，之后时钟静止，只能经 advanceClock()
+ *     按正整数秒整体向前推进；
+ *   - 网络写入 / 请求发送、document.cookie 读写、罐快照（过期标记 / 剩余时间）、
+ *     容量淘汰（过期清理与最近访问时间 LRA）统一取该时钟，不再各自读系统墙钟；
+ *   - 推进本身不删除任何条目：已过期项仍保留在罐快照中（标记 expired），
+ *     到下次匹配（发送 / document.cookie 读取 → 排除）或容量淘汰（超限先物理清理过期项）
+ *     时再按既有规则处理；
+ *   - 重置罐（reset()）时同步重置时钟：以当时的真实时间为新的演算起点（容量设置保留）。
+ *
  *  写入（Set-Cookie）：
  *   - Domain 不匹配响应主机（不是主机本身、也不是其上级域）时拒绝；
  *   - 省略 Domain 时为 host-only cookie；带 Domain 时去掉前导点且为 Domain cookie；
@@ -240,6 +250,20 @@ export interface CapacityView {
   }>;
 }
 
+/** 可控时间轴（演算时钟）快照：Web / API 共用 */
+export interface ClockView {
+  /** 当前演算时间（服务启动时固定，只能按正整数秒向前推进）的可读形式 */
+  now: string;
+  /** 当前演算时间的绝对时间戳（ms） */
+  nowMs: number;
+  /** 演算起点（服务启动，或上次重置罐）的可读形式 */
+  epoch: string;
+  /** 演算起点的绝对时间戳（ms） */
+  epochMs: number;
+  /** 自演算起点起已推进的秒数（正整数累计） */
+  advancedSeconds: number;
+}
+
 export interface StoreResult {
   ok: boolean;
   action: StoreAction;
@@ -288,7 +312,7 @@ export interface StoreOptions {
    * 拒绝在改动罐之前返回，罐内容、时间戳与容量均不变。
    */
   fromScript?: boolean;
-  /** 注入当前时间戳（测试用），缺省 Date.now() */
+  /** 注入当前时间戳（单元测试用，绕过演算时钟）；缺省取罐内可控时钟 this.now() */
   now?: number;
 }
 
@@ -679,6 +703,45 @@ export class CookieJar {
   private globalLimit: number | null = null;
   /** 每个可注册域的容量上限；未列出表示不限 */
   private domainLimits = new Map<string, number>();
+  /**
+   * 演算时钟：epochMs 为服务启动（或上次重置罐）时固定的真实时间；
+   * offsetMs 为累计推进量（只增）。now() = epochMs + offsetMs 即罐内统一的「现在」。
+   */
+  private epochMs: number;
+  private offsetMs = 0;
+
+  constructor() {
+    this.epochMs = Date.now();
+  }
+
+  /** 罐内统一的「当前演算时间」（ms）：启动时固定，只能经 advanceClock 向前推进 */
+  now(): number {
+    return this.epochMs + this.offsetMs;
+  }
+
+  /** 演算时钟快照（当前时间、起点、已推进秒数） */
+  clock(): ClockView {
+    return {
+      now: formatTime(this.now()),
+      nowMs: this.now(),
+      epoch: formatTime(this.epochMs),
+      epochMs: this.epochMs,
+      advancedSeconds: Math.floor(this.offsetMs / 1000),
+    };
+  }
+
+  /**
+   * 把演算时钟整体向前推进 seconds 秒（只允许正整数）。
+   * 推进本身不删除任何条目：过期 / 120 秒宽限等到下次匹配或容量淘汰再按既有规则处理。
+   * 返回推进后的时钟快照；非法秒数抛错且时间、罐内容均不变。
+   */
+  advanceClock(seconds: number): ClockView {
+    if (!Number.isInteger(seconds) || seconds <= 0) {
+      throw new Error('推进秒数必须是正整数（>= 1）');
+    }
+    this.offsetMs += seconds * 1000;
+    return this.clock();
+  }
 
   /**
    * 按顺序处理一次「响应 URL + 单条 Set-Cookie」写入。
@@ -689,7 +752,7 @@ export class CookieJar {
    * 返回动作（入罐 / 更新 / 删除 / 拒绝）及原因。
    */
   store(responseUrl: string, setCookieHeader: string, topUrl?: string, options: StoreOptions = {}): StoreResult {
-    const now = options.now ?? Date.now();
+    const now = options.now ?? this.now();
     const urlInfo = hostFromUrl(responseUrl);
     if (!urlInfo) {
       return this.result(false, 'rejected', `响应 URL 非法或非 http(s)：${responseUrl}`, []);
@@ -1015,7 +1078,7 @@ export class CookieJar {
    * 请求分区键由顶层页面 URL（缺省取请求 URL）计算；Partitioned 项仅在分区键相同时发送。
    * 逐项给出 send / exclude 及原因；发送项按 Path 长度降序、首次创建顺序升序排列。
    */
-  send(requestUrl: string, options: SendOptions = {}, now: number = Date.now()): SendResult {
+  send(requestUrl: string, options: SendOptions = {}, now: number = this.now()): SendResult {
     const urlInfo = hostFromUrl(requestUrl);
     if (!urlInfo) {
       return this.sendError(`请求 URL 非法或非 http(s)：${requestUrl}`, requestUrl);
@@ -1230,7 +1293,7 @@ export class CookieJar {
     const sameSiteContext = pageSite === topSite;
     const partitionKey = topSite;
     const siteCompare = `页面站 ${pageSite} ${sameSiteContext ? '=' : '≠'} 顶层站 ${topSite}`;
-    const now = Date.now();
+    const now = this.now();
 
     const readable: ScriptReadItem[] = [];
     const excluded: ScriptReadItem[] = [];
@@ -1362,8 +1425,8 @@ export class CookieJar {
     };
   }
 
-  /** 当前罐内容（会话/未过期状态如实展示，不过滤过期项） */
-  list(now: number = Date.now()): CookieView[] {
+  /** 当前罐内容（会话/未过期状态如实展示，过期项只标记 expired、不删除） */
+  list(now: number = this.now()): CookieView[] {
     return this.views(now);
   }
 
@@ -1376,7 +1439,7 @@ export class CookieJar {
    * 更新容量设置（全局 + 各可注册域上限，单位：条目数；null/缺省表示不限），
    * 替换式更新，并对所有已配置上限的级别立即执行一次压力淘汰。
    */
-  setCapacity(config: { globalLimit?: number | null; domainLimits?: Record<string, number> }, now: number = Date.now()): {
+  setCapacity(config: { globalLimit?: number | null; domainLimits?: Record<string, number> }, now: number = this.now()): {
     capacity: CapacityView;
     eviction: EvictionReport;
   } {
@@ -1405,6 +1468,9 @@ export class CookieJar {
   reset(): void {
     this.cookies = [];
     this.nextIndex = 1;
+    // 重置罐时同步重置时钟：以当前真实时间为新的演算起点（已推进量清零）
+    this.epochMs = Date.now();
+    this.offsetMs = 0;
     // 容量设置属于模拟参数，重置罐内容时保留，便于重复演算
   }
 
@@ -1612,7 +1678,7 @@ export class CookieJar {
     _parsed?: ParsedSetCookie,
     stored?: StoredCookie,
     eviction: EvictionReport | null = null,
-    now: number = Date.now(),
+    now: number = this.now(),
   ): StoreResult {
     return {
       ok,

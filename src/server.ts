@@ -19,7 +19,9 @@
  *                                以及对同身份未过期 HttpOnly 项的覆盖或 Max-Age 删除
  *                                （拒绝时罐内容、时间戳、容量不变；网络接口 /api/store 不受此限）
  *   POST /api/capacity           { globalLimit?, domainLimits? } 设置全局/每可注册域容量并立即执行淘汰
- *   POST /api/reset              清空内存罐（容量设置保留）
+ *   GET  /api/clock              读取可控时间轴（演算时钟）快照
+ *   POST /api/clock/advance      { seconds } 把演算时钟向前推进正整数秒（非法输入 400，时间与罐均不变）
+ *   POST /api/reset              清空内存罐并同步重置演算时钟（容量设置保留）
  *
  * Cookie 状态全部保存在进程内存中，重启 / 重置即清空。
  */
@@ -224,12 +226,49 @@ app.post('/api/capacity', (req, res) => {
 });
 
 app.get('/api/jar', (_req, res) => {
-  res.json({ ok: true, cookies: jar.list(), capacity: jar.capacity() });
+  res.json({ ok: true, clock: jar.clock(), cookies: jar.list(), capacity: jar.capacity() });
+});
+
+interface ClockAdvanceBody {
+  seconds?: unknown;
+}
+
+app.get('/api/clock', (_req, res) => {
+  res.json({ ok: true, clock: jar.clock() });
+});
+
+app.post('/api/clock/advance', (req, res) => {
+  const { seconds } = (req.body ?? {}) as ClockAdvanceBody;
+  // 只接受 JSON 正整数秒（数字字符串不接受）：非整数、<=0、缺失、其它类型一律 400，
+  // 时间与罐内容都不变；推进本身也不删除任何条目。
+  if (typeof seconds !== 'number' || !Number.isInteger(seconds) || seconds <= 0) {
+    res.status(400).json({
+      ok: false,
+      error: '推进秒数（字段 seconds）必须是不小于 1 的正整数；演算时间与 Cookie 罐均未改动',
+      clock: jar.clock(),
+    });
+    return;
+  }
+  let clock;
+  try {
+    clock = jar.advanceClock(seconds);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message, clock: jar.clock() });
+    return;
+  }
+  // 推进不删条目：过期项仍在 cookies 中（标记 expired），下次匹配或容量淘汰再按既有规则处理
+  res.json({ ok: true, clock, cookies: jar.list(), capacity: jar.capacity() });
 });
 
 app.post('/api/reset', (_req, res) => {
   jar.reset();
-  res.json({ ok: true, message: 'Cookie 罐已重置（内存已清空；容量设置保留）', cookies: [], capacity: jar.capacity() });
+  res.json({
+    ok: true,
+    message: 'Cookie 罐与演算时钟已重置（内存已清空，时钟回到重置时刻；容量设置保留）',
+    clock: jar.clock(),
+    cookies: [],
+    capacity: jar.capacity(),
+  });
 });
 
 // 兜底：未匹配的 /api 路径返回 JSON 404，其它路径交回前端首页

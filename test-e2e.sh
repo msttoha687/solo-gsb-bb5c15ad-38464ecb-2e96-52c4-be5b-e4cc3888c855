@@ -130,9 +130,9 @@ R=$(post /api/send '{"url":"https://order.test/aa/x"}')
 HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
 check "c1 在 c2 前" "c1=1; c2=2" "$HDR"
 
-echo "== H. 过期 cookie 不发送（Max-Age=1 秒） =="
+echo "== H. 过期 cookie 不发送（Max-Age=1 秒，推进演算时钟 2 秒） =="
 post /api/store '{"url":"https://exp.test/","setCookie":"quick=dying; Path=/; Max-Age=1"}' >/dev/null
-sleep 1.5
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/send '{"url":"https://exp.test/"}')
 HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
 if [[ "$HDR" != *"quick=dying"* ]]; then echo "✅ 过期项不在 Cookie 头"; PASS=$((PASS+1));
@@ -345,7 +345,7 @@ echo "== P9. 超限时先清理过期项，清完不超限则不淘汰 =="
 post /api/capacity '{"domainLimits":{"exp.cap":2}}' >/dev/null
 post /api/store '{"url":"https://a.exp.cap/","setCookie":"dead=1; Path=/; Max-Age=1; Priority=High"}' >/dev/null
 post /api/store '{"url":"https://a.exp.cap/","setCookie":"lowc=1; Path=/; Priority=Low"}' >/dev/null
-sleep 1.3
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/store '{"url":"https://a.exp.cap/","setCookie":"medc=1; Path=/; Priority=Medium"}')
 check "过期清理 1 条" '"expiredRemoved":1' "$R"
 check "无需优先级淘汰" '"evictedCount":0' "$R"
@@ -396,12 +396,12 @@ post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
 echo "== P12. LRA：发送成功刷新最近访问时间，最久未访问先淘汰（同优先级）=="
 post /api/capacity '{"domainLimits":{"lra.test":2}}' >/dev/null
 post /api/store '{"url":"https://lra.test/keep","setCookie":"c1=1; Path=/keep; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 post /api/store '{"url":"https://lra.test/other","setCookie":"c2=2; Path=/other; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 # 仅请求 /keep：只发送 c1，c1 的最近访问时间被刷新
 post /api/send '{"url":"https://lra.test/keep/x"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/store '{"url":"https://lra.test/z","setCookie":"c3=3; Path=/z; Priority=Medium"}')
 check "淘汰最久未访问的 c2" '"cookie":"c2=2"' "$R"
 
@@ -702,16 +702,16 @@ echo "== U5. 被屏蔽排除的条目不刷新最近访问时间 =="
 post /api/reset '{}' >/dev/null
 post /api/capacity '{"domainLimits":{"lra3p.test":2}}' >/dev/null
 post /api/store '{"url":"https://lra3p.test/","setCookie":"a=1; Path=/a; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 post /api/store '{"url":"https://lra3p.test/","setCookie":"b=2; Path=/b; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 # 同站请求 /b/x：仅 b 命中路径并发送，b 的最近访问时间被刷新；a 不动
 post /api/send '{"url":"https://lra3p.test/b/x"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 # 跨站 + 屏蔽请求 /a/x：a 命中路径但被第三方屏蔽排除，最近访问时间不得刷新
 R=$(post /api/send '{"url":"https://lra3p.test/a/x","topUrl":"https://other.example/","blockThirdParty":true}')
 check "a 被屏蔽排除" "屏蔽第三方 Cookie：跨站请求" "$R"
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 # 写入 c 触发域级淘汰：a 的访问时间最老（屏蔽排除未刷新），应淘汰 a；
 # 若屏蔽排除错误地刷新了 a，则最老是 b，断言会失败
 R=$(post /api/store '{"url":"https://lra3p.test/","setCookie":"c=3; Path=/c; Priority=Medium"}')
@@ -793,7 +793,7 @@ else echo "✅ other 已删除"; PASS=$((PASS+1)); fi
 
 echo "== D7. 已过期 HttpOnly 项不在保护之列：脚本可顶替 =="
 post /api/store '{"url":"https://js.test/","setCookie":"dying=old; Path=/; Max-Age=1; HttpOnly"}' >/dev/null
-sleep 1.3
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/script/write '{"url":"https://js.test/","setCookie":"dying=new; Path=/"}')
 check "过期 HttpOnly 可被脚本覆盖" '"action":"updated"' "$R"
 J=$(curl -s "$BASE/api/jar")
@@ -890,7 +890,7 @@ check "https 页面可读 Secure 项" "sp=1" "$R"
 
 echo "== E7. 过期项读取排除并说明原因 =="
 post /api/store '{"url":"https://js.test/","setCookie":"q=1; Path=/; Max-Age=1"}' >/dev/null
-sleep 1.3
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/script/read '{"url":"https://js.test/"}')
 check "过期排除原因" "document.cookie 读不到" "$R"
 STR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieString'])")
@@ -901,11 +901,11 @@ echo "== E8. 脚本读取为纯只读：不刷新最近访问时间（用容量 
 post /api/reset '{}' >/dev/null
 post /api/capacity '{"domainLimits":{"lras.test":2}}' >/dev/null
 post /api/store '{"url":"https://lras.test/a","setCookie":"a=1; Path=/a; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 post /api/store '{"url":"https://lras.test/b","setCookie":"b=2; Path=/b; Priority=Medium"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 post /api/script/read '{"url":"https://lras.test/a/x"}' >/dev/null
-sleep 1.2
+post /api/clock/advance '{"seconds":2}' >/dev/null
 R=$(post /api/store '{"url":"https://lras.test/c","setCookie":"c=3; Path=/c; Priority=Medium"}')
 check "淘汰最久未访问的 a（脚本读取未刷新访问时间）" '"cookie":"a=1"' "$R"
 post /api/reset '{}' >/dev/null
@@ -920,6 +920,118 @@ R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/script/read" -H 'C
 [ "$R" = "400" ] && { echo "✅ /api/script/read 非布尔参数 400"; PASS=$((PASS+1)); } || { echo "❌ 应 400，实际 $R"; FAIL=$((FAIL+1)); }
 R=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/script/write" -H 'Content-Type: application/json' -d '{"url":"https://js.test/"}')
 [ "$R" = "400" ] && { echo "✅ /api/script/write 缺 setCookie 400"; PASS=$((PASS+1)); } || { echo "❌ 应 400，实际 $R"; FAIL=$((FAIL+1)); }
+
+post /api/reset '{}' >/dev/null
+
+echo
+echo "------- 可控时间轴（演算时钟 /api/clock） -------"
+
+echo "== X0. 重置罐同步重置时钟（advancedSeconds 归零） =="
+post /api/clock/advance '{"seconds":30}' >/dev/null
+R=$(post /api/reset '{}')
+check "重置响应含时钟" '"clock"' "$R"
+check "重置后已推进 0 秒" '"advancedSeconds":0' "$R"
+
+echo "== X1. GET /api/clock 读取时钟，jar 快照也带时钟 =="
+R=$(curl -s "$BASE/api/clock")
+check "clock 接口 ok" '"ok":true' "$R"
+check "含可读当前时间" '"now"' "$R"
+check "含演算起点" '"epoch"' "$R"
+check "初始已推进 0 秒" '"advancedSeconds":0' "$R"
+J=$(curl -s "$BASE/api/jar")
+check "jar 快照带时钟" '"clock"' "$J"
+
+echo "== X2. 推进 60 秒（正整数） =="
+R=$(post /api/clock/advance '{"seconds":60}')
+check "推进 ok" '"ok":true' "$R"
+check "已推进 60 秒" '"advancedSeconds":60' "$R"
+check "响应带罐快照" '"cookies":[]' "$R"
+R=$(curl -s "$BASE/api/clock")
+check "再读为累计 60 秒" '"advancedSeconds":60' "$R"
+# 再推进 60 秒 -> 累计 120
+post /api/clock/advance '{"seconds":60}' >/dev/null
+R=$(curl -s "$BASE/api/clock")
+check "累计推进 120 秒" '"advancedSeconds":120' "$R"
+
+echo "== X3. 非法推进秒数：400 且时间与罐都不变 =="
+for BAD in '0' '-1' '1.5' '"60"' 'null' 'true' '""' '{}' '[]'; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/clock/advance" -H 'Content-Type: application/json' -d "{\"seconds\":$BAD}")
+  [ "$CODE" = "400" ] && { echo "✅ seconds=$BAD 拒绝（400）"; PASS=$((PASS+1)); } || { echo "❌ seconds=$BAD 应 400，实际 $CODE"; FAIL=$((FAIL+1)); }
+done
+# 缺字段也是 400
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/clock/advance" -H 'Content-Type: application/json' -d '{}')
+[ "$CODE" = "400" ] && { echo "✅ 缺 seconds 拒绝（400）"; PASS=$((PASS+1)); } || { echo "❌ 缺 seconds 应 400，实际 $CODE"; FAIL=$((FAIL+1)); }
+R=$(curl -s "$BASE/api/clock")
+check "非法输入后时钟仍是 120 秒" '"advancedSeconds":120' "$R"
+
+echo "== X4. Max-Age 过期逐步复现：推进不删条目，发送时才排除 =="
+post /api/reset '{}' >/dev/null
+post /api/store '{"url":"https://ttl.test/","setCookie":"life=1; Path=/; Max-Age=60"}' >/dev/null
+post /api/clock/advance '{"seconds":60}' >/dev/null
+# 恰好到期：条目仍在罐快照（标记 expired=true）
+J=$(curl -s "$BASE/api/jar")
+echo "$J" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+assert len(d['cookies'])==1 and d['cookies'][0]['expired'] is True, d
+print('✅ 推进到恰好过期：条目保留并标记 expired=true')" && PASS=$((PASS+1)) || { echo "❌ 推进不应删除过期条目"; FAIL=$((FAIL+1)); }
+R=$(post /api/send '{"url":"https://ttl.test/"}')
+check "发送时已过期排除" "已过期" "$R"
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+if [[ "$HDR" != *"life=1"* ]]; then echo "✅ 过期项不在 Cookie 头"; PASS=$((PASS+1));
+else echo "❌ 过期项仍被发送"; FAIL=$((FAIL+1)); fi
+
+echo "== X5. 未到期仍可发送（推进 10 秒 < Max-Age 60） =="
+post /api/reset '{}' >/dev/null
+post /api/store '{"url":"https://ttl.test/","setCookie":"life=1; Path=/; Max-Age=60"}' >/dev/null
+post /api/clock/advance '{"seconds":10}' >/dev/null
+R=$(post /api/send '{"url":"https://ttl.test/"}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "未到期发送" "life=1" "$HDR"
+J=$(curl -s "$BASE/api/jar")
+check "快照标记未过期" '"expired":false' "$J"
+
+echo "== X6. document.cookie 读取也用同一时钟（过期读不到、条目仍在） =="
+post /api/clock/advance '{"seconds":50}' >/dev/null
+R=$(post /api/script/read '{"url":"https://ttl.test/"}')
+check "读取过期说明" "document.cookie 读不到" "$R"
+J=$(curl -s "$BASE/api/jar")
+check "条目仍保留在罐中" '"name":"life"' "$J"
+
+echo "== X7. 容量淘汰的过期清理使用演算时钟（超限时才物理清理过期项） =="
+post /api/reset '{}' >/dev/null
+post /api/capacity '{"domainLimits":{"ttl.test":2}}' >/dev/null
+post /api/store '{"url":"https://ttl.test/","setCookie":"a=1; Path=/; Max-Age=10; Priority=High"}' >/dev/null
+post /api/store '{"url":"https://ttl.test/","setCookie":"b=2; Path=/; Priority=Low"}' >/dev/null
+post /api/clock/advance '{"seconds":11}' >/dev/null
+# 推进不删：此时 a 仍在（2 条，未超限）
+J=$(curl -s "$BASE/api/jar")
+check "推进后 a 仍在（推进不清理）" '"name":"a"' "$J"
+# 第 3 条入罐超限：先物理清理已过期的 a，不再淘汰 b
+R=$(post /api/store '{"url":"https://ttl.test/","setCookie":"c=3; Path=/; Priority=Medium"}')
+check "清理过期 1 条" '"expiredRemoved":1' "$R"
+check "无需优先级淘汰" '"evictedCount":0' "$R"
+check "被清理的是 a" '"cookie":"a=1"' "$R"
+J=$(curl -s "$BASE/api/jar")
+if echo "$J" | grep -q '"name":"a"'; then echo "❌ a 应在容量淘汰时被物理清理"; FAIL=$((FAIL+1));
+else echo "✅ a 已在容量淘汰的过期清理中物理删除"; PASS=$((PASS+1)); fi
+post /api/capacity '{"globalLimit":null,"domainLimits":{}}' >/dev/null
+
+echo "== X8. 默认 Lax 120 秒跨站顶层 POST 宽限逐步复现 =="
+post /api/reset '{}' >/dev/null
+# 未声明 SameSite -> 默认 Lax；同站上下文写入
+post /api/store '{"url":"https://grace.test/","setCookie":"g=1; Path=/"}' >/dev/null
+post /api/clock/advance '{"seconds":100}' >/dev/null
+R=$(post /api/send '{"url":"https://grace.test/","topUrl":"https://other.org/","method":"POST","topLevelNav":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+check "100 秒（≤120）宽限内放行" "g=1" "$HDR"
+check "宽限说明" "120 秒宽限的顶层 POST" "$R"
+post /api/clock/advance '{"seconds":21}' >/dev/null
+R=$(post /api/send '{"url":"https://grace.test/","topUrl":"https://other.org/","method":"POST","topLevelNav":true}')
+HDR=$(echo "$R" | python3 -c "import sys,json;print(json.load(sys.stdin)['cookieHeader'])")
+if [[ "$HDR" != *"g=1"* ]]; then echo "✅ 121 秒（>120）宽限已过不发送"; PASS=$((PASS+1));
+else echo "❌ 超过 120 秒宽限仍被发送"; FAIL=$((FAIL+1)); fi
+check "宽限已过说明" "120 秒宽限已过" "$R"
 
 post /api/reset '{}' >/dev/null
 
