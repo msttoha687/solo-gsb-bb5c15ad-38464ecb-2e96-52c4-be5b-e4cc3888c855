@@ -19,7 +19,15 @@
  *                                以及对同身份未过期 HttpOnly 项的覆盖或 Max-Age 删除
  *                                （拒绝时罐内容、时间戳、容量不变；网络接口 /api/store 不受此限）
  *   POST /api/capacity           { globalLimit?, domainLimits? } 设置全局/每可注册域容量并立即执行淘汰
- *   POST /api/reset              清空内存罐（容量设置保留）
+ *   GET  /api/clock              读取演算时钟（当前演算时间、启动时刻、已推进秒数）
+ *   POST /api/clock/advance      { seconds } 以正整数秒推进演算时钟；非法输入（缺省、0、负数、
+ *                                非整数、非数字）返回 400，时钟与罐均不变；推进本身不删除条目，
+ *                                过期项留待下次匹配或容量淘汰按既有规则处理
+ *   POST /api/reset              清空内存罐（容量设置保留；演算时钟同步回到服务启动时刻）
+ *
+ * 演算时钟：服务启动时固定当前真实时间为起点，之后只经 /api/clock/advance 推进；
+ * 网络写入/发送、document.cookie 读写、罐快照与容量淘汰统一使用该时钟，
+ * Max-Age 过期、默认 Lax 的 120 秒跨站顶层 POST 宽限与过期清理均可逐步复现。
  *
  * Cookie 状态全部保存在进程内存中，重启 / 重置即清空。
  */
@@ -224,12 +232,50 @@ app.post('/api/capacity', (req, res) => {
 });
 
 app.get('/api/jar', (_req, res) => {
-  res.json({ ok: true, cookies: jar.list(), capacity: jar.capacity() });
+  res.json({ ok: true, cookies: jar.list(), capacity: jar.capacity(), clock: jar.clock() });
+});
+
+app.get('/api/clock', (_req, res) => {
+  res.json({ ok: true, clock: jar.clock() });
+});
+
+interface ClockAdvanceBody {
+  seconds?: unknown;
+}
+
+/** 推进秒数校验：正整数（>=1）才合法；数字或数字字符串都接受 */
+function parseAdvanceSeconds(value: unknown): number {
+  const n = typeof value === 'string' ? Number(value.trim()) : value;
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 1) {
+    throw new Error('推进秒数（字段 seconds）必须是不小于 1 的正整数；时钟与罐均未改动');
+  }
+  return n;
+}
+
+app.post('/api/clock/advance', (req, res) => {
+  const { seconds } = (req.body ?? {}) as ClockAdvanceBody;
+  let n: number;
+  try {
+    n = parseAdvanceSeconds(seconds);
+  } catch (err) {
+    // 非法输入：400，时钟与罐均不变
+    res.status(400).json({ ok: false, error: (err as Error).message });
+    return;
+  }
+  const clock = jar.advance(n);
+  // 推进本身不删除条目；仅时间变化，快照中的过期/剩余展示随之更新，故回传最新罐与用量
+  res.json({ ok: true, clock, cookies: jar.list(), capacity: jar.capacity() });
 });
 
 app.post('/api/reset', (_req, res) => {
   jar.reset();
-  res.json({ ok: true, message: 'Cookie 罐已重置（内存已清空；容量设置保留）', cookies: [], capacity: jar.capacity() });
+  res.json({
+    ok: true,
+    message: 'Cookie 罐已重置（内存已清空；容量设置保留；演算时钟已回到服务启动时刻）',
+    cookies: [],
+    capacity: jar.capacity(),
+    clock: jar.clock(),
+  });
 });
 
 // 兜底：未匹配的 /api 路径返回 JSON 404，其它路径交回前端首页

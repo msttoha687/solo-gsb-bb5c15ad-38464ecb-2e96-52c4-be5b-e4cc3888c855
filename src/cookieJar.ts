@@ -62,6 +62,16 @@
  *     所有脚本专属拒绝都在改动罐之前返回，罐内容、时间戳与容量保持不变。
  *     已过期的 HttpOnly 项不在保护之列（脚本赋值可正常顶替 / 删除）。
  *   - 网络接口（/api/store、/api/send）行为不变：照常写入、更新、删除并在请求头中发送 HttpOnly 项。
+ *
+ *  演算时钟（可控时间轴）：
+ *   - 服务启动时把「当前真实时间」固定为演算时钟起点，之后不再随真实时间流动；
+ *   - 只能经 POST /api/clock/advance 以正整数秒推进；非法输入（缺省、0、负数、
+ *     非整数、非数字）被拒绝，时间与罐均不变；
+ *   - 网络写入/发送、document.cookie 读写、罐快照与容量淘汰统一使用该时钟：
+ *     Max-Age 过期、默认 Lax 的 120 秒跨站顶层 POST 宽限、过期清理都可逐步复现；
+ *   - 推进本身不删除任何条目：过期项仍留在罐中（标灰展示），下次匹配或容量淘汰时
+ *     再按既有规则处理；
+ *   - 重置罐（POST /api/reset）时时钟同步回到启动时刻。
  */
 import { getDomain } from 'tldts';
 
@@ -240,6 +250,20 @@ export interface CapacityView {
   }>;
 }
 
+/** 演算时钟快照（供界面与 API 展示） */
+export interface ClockView {
+  /** 当前演算时间戳（ms） */
+  now: number;
+  /** 当前演算时间（可读，本地时区） */
+  readable: string;
+  /** 服务启动时固定的起始时间戳（ms）；重置罐时时钟回到该时刻 */
+  startedAt: number;
+  /** 起始时间（可读） */
+  startedAtReadable: string;
+  /** 相对启动时刻已推进的整秒数 */
+  elapsedSeconds: number;
+}
+
 export interface StoreResult {
   ok: boolean;
   action: StoreAction;
@@ -288,7 +312,7 @@ export interface StoreOptions {
    * 拒绝在改动罐之前返回，罐内容、时间戳与容量均不变。
    */
   fromScript?: boolean;
-  /** 注入当前时间戳（测试用），缺省 Date.now() */
+  /** 注入当前时间戳（测试用），缺省取演算时钟（jar.now()） */
   now?: number;
 }
 
@@ -679,6 +703,39 @@ export class CookieJar {
   private globalLimit: number | null = null;
   /** 每个可注册域的容量上限；未列出表示不限 */
   private domainLimits = new Map<string, number>();
+  /** 演算时钟起点：服务启动时固定的真实时间（重置罐时时钟回到该时刻） */
+  private readonly clockStart: number = Date.now();
+  /** 演算时钟当前值（ms）：不随真实时间流动，只能经 advance() 以正整数秒推进 */
+  private clockNow: number = this.clockStart;
+
+  /** 当前演算时间戳（ms）：网络读写、脚本读写、罐快照与容量淘汰统一取它 */
+  now(): number {
+    return this.clockNow;
+  }
+
+  /** 演算时钟快照（界面与 API 展示用） */
+  clock(): ClockView {
+    return {
+      now: this.clockNow,
+      readable: formatTime(this.clockNow),
+      startedAt: this.clockStart,
+      startedAtReadable: formatTime(this.clockStart),
+      elapsedSeconds: Math.floor((this.clockNow - this.clockStart) / 1000),
+    };
+  }
+
+  /**
+   * 推进演算时钟：仅接受正整数秒；非法输入（0、负数、非整数、非有限数）抛错，
+   * 时间与罐均不变。推进本身不删除任何条目——过期项留在罐中，
+   * 下次匹配（发送/脚本读取）或容量淘汰时再按既有规则处理。
+   */
+  advance(seconds: number): ClockView {
+    if (typeof seconds !== 'number' || !Number.isSafeInteger(seconds) || seconds < 1) {
+      throw new Error(`推进秒数必须是不小于 1 的正整数（收到：${String(seconds)}），时钟与罐均未改动`);
+    }
+    this.clockNow = Math.min(this.clockNow + seconds * 1000, MAX_SAFE_EXPIRES);
+    return this.clock();
+  }
 
   /**
    * 按顺序处理一次「响应 URL + 单条 Set-Cookie」写入。
@@ -689,7 +746,7 @@ export class CookieJar {
    * 返回动作（入罐 / 更新 / 删除 / 拒绝）及原因。
    */
   store(responseUrl: string, setCookieHeader: string, topUrl?: string, options: StoreOptions = {}): StoreResult {
-    const now = options.now ?? Date.now();
+    const now = options.now ?? this.clockNow;
     const urlInfo = hostFromUrl(responseUrl);
     if (!urlInfo) {
       return this.result(false, 'rejected', `响应 URL 非法或非 http(s)：${responseUrl}`, []);
@@ -1015,7 +1072,7 @@ export class CookieJar {
    * 请求分区键由顶层页面 URL（缺省取请求 URL）计算；Partitioned 项仅在分区键相同时发送。
    * 逐项给出 send / exclude 及原因；发送项按 Path 长度降序、首次创建顺序升序排列。
    */
-  send(requestUrl: string, options: SendOptions = {}, now: number = Date.now()): SendResult {
+  send(requestUrl: string, options: SendOptions = {}, now: number = this.clockNow): SendResult {
     const urlInfo = hostFromUrl(requestUrl);
     if (!urlInfo) {
       return this.sendError(`请求 URL 非法或非 http(s)：${requestUrl}`, requestUrl);
@@ -1230,7 +1287,7 @@ export class CookieJar {
     const sameSiteContext = pageSite === topSite;
     const partitionKey = topSite;
     const siteCompare = `页面站 ${pageSite} ${sameSiteContext ? '=' : '≠'} 顶层站 ${topSite}`;
-    const now = Date.now();
+    const now = this.clockNow;
 
     const readable: ScriptReadItem[] = [];
     const excluded: ScriptReadItem[] = [];
@@ -1363,7 +1420,7 @@ export class CookieJar {
   }
 
   /** 当前罐内容（会话/未过期状态如实展示，不过滤过期项） */
-  list(now: number = Date.now()): CookieView[] {
+  list(now: number = this.clockNow): CookieView[] {
     return this.views(now);
   }
 
@@ -1376,7 +1433,7 @@ export class CookieJar {
    * 更新容量设置（全局 + 各可注册域上限，单位：条目数；null/缺省表示不限），
    * 替换式更新，并对所有已配置上限的级别立即执行一次压力淘汰。
    */
-  setCapacity(config: { globalLimit?: number | null; domainLimits?: Record<string, number> }, now: number = Date.now()): {
+  setCapacity(config: { globalLimit?: number | null; domainLimits?: Record<string, number> }, now: number = this.clockNow): {
     capacity: CapacityView;
     eviction: EvictionReport;
   } {
@@ -1405,6 +1462,8 @@ export class CookieJar {
   reset(): void {
     this.cookies = [];
     this.nextIndex = 1;
+    // 重置罐内容时同步重置演算时钟（回到服务启动时固定的时刻），便于从头复现时间线
+    this.clockNow = this.clockStart;
     // 容量设置属于模拟参数，重置罐内容时保留，便于重复演算
   }
 
@@ -1612,7 +1671,7 @@ export class CookieJar {
     _parsed?: ParsedSetCookie,
     stored?: StoredCookie,
     eviction: EvictionReport | null = null,
-    now: number = Date.now(),
+    now: number = this.clockNow,
   ): StoreResult {
     return {
       ok,

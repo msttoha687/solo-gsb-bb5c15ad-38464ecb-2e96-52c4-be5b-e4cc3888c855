@@ -25,6 +25,12 @@ const els = {
   jarWrap: $('#jar-table-wrap'),
   jarEmpty: $('#jar-empty'),
 
+  clockNow: $('#clock-now'),
+  clockMeta: $('#clock-meta'),
+  clockSeconds: $('#clock-seconds'),
+  clockAdvance: $('#clock-advance'),
+  clockResult: $('#clock-result'),
+
   capGlobal: $('#cap-global'),
   capAdd: $('#cap-add'),
   capDomains: $('#cap-domains'),
@@ -184,7 +190,52 @@ async function refreshJar() {
     renderCapacityUsage(data.capacity);
     syncCapacityInputs(data.capacity);
   }
+  if (data.clock) renderClock(data.clock);
 }
+
+/* ---------- 演算时钟 ---------- */
+
+function renderClock(clock) {
+  els.clockNow.textContent = clock.readable;
+  els.clockMeta.textContent =
+    `启动时刻 ${clock.startedAtReadable} · 已推进 ${clock.elapsedSeconds} 秒`;
+}
+
+function renderClockError(message) {
+  els.clockResult.classList.remove('hidden');
+  els.clockResult.innerHTML =
+    `<div class="banner bad"><span class="banner-title">⛔ 无法推进</span>${escapeHtml(message)}</div>`;
+}
+
+els.clockAdvance.addEventListener('click', async () => {
+  const raw = els.clockSeconds.value.trim();
+  const n = Number(raw);
+  if (raw === '' || !Number.isSafeInteger(n) || n < 1) {
+    renderClockError('推进秒数必须是不小于 1 的正整数（时钟与罐均未改动）');
+    return;
+  }
+  els.clockAdvance.disabled = true;
+  try {
+    const data = await postJSON('/api/clock/advance', { seconds: n });
+    if (data.clock) renderClock(data.clock);
+    // 推进本身不删除条目，但过期/剩余展示随时间变化，需刷新罐表格与用量
+    if (data.cookies) renderJar(data.cookies);
+    if (data.capacity) renderCapacityUsage(data.capacity);
+    els.clockResult.classList.remove('hidden');
+    els.clockResult.innerHTML =
+      `<div class="banner ok"><span class="banner-title">✅ 已推进 ${n} 秒</span>` +
+      `当前演算时间 ${escapeHtml(data.clock ? data.clock.readable : '')}；` +
+      `过期项仍留在罐中，下次匹配或容量淘汰时按既有规则处理</div>`;
+  } catch (err) {
+    renderClockError(err instanceof Error ? err.message : String(err));
+  } finally {
+    els.clockAdvance.disabled = false;
+  }
+});
+
+els.clockSeconds.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') els.clockAdvance.click();
+});
 
 /* ---------- 写入结果 ---------- */
 
@@ -508,13 +559,15 @@ els.resetBtn.addEventListener('click', async () => {
     const data = await postJSON('/api/reset', {});
     renderJar([]);
     if (data.capacity) renderCapacityUsage(data.capacity);
+    if (data.clock) renderClock(data.clock);
     els.storeResult.classList.add('hidden');
     els.sendResult.classList.add('hidden');
     els.capResult.classList.add('hidden');
     els.scriptReadResult.classList.add('hidden');
     els.scriptWriteResult.classList.add('hidden');
+    els.clockResult.classList.add('hidden');
     els.storeCookie.value = '';
-    toast('Cookie 罐已重置（容量设置保留）');
+    toast('Cookie 罐已重置（容量设置保留，时钟回到启动时刻）');
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err));
   }

@@ -99,8 +99,26 @@
       </section>
     </div>
 
-    <!-- 右列：容量压力 + 罐子 -->
+    <!-- 右列：演算时钟 + 容量压力 + 罐子 -->
     <aside class="col-side">
+      <section class="card clock-card" id="clock-card">
+        <div class="jar-head">
+          <h2>⏱ 演算时钟</h2>
+        </div>
+        <p class="jar-count">服务启动时<strong>固定当前时间</strong>，之后只能按<strong>正整数秒</strong>推进；Max-Age 过期、默认 Lax 的 120 秒跨站顶层 POST 宽限、过期清理与容量淘汰都按该时间演算。<strong>推进本身不删除条目</strong>；重置罐时时钟同步回到启动时刻。</p>
+
+        <div class="clock-now">
+          <div class="clock-time" id="clock-now">—</div>
+          <div class="dim" id="clock-meta">启动时刻 — · 已推进 0 秒</div>
+        </div>
+
+        <div class="cap-row clock-row">
+          <input id="clock-seconds" type="text" inputmode="numeric" placeholder="推进秒数（正整数），如 120" spellcheck="false" autocomplete="off" />
+          <button id="clock-advance" class="btn primary small" type="button">推进</button>
+        </div>
+        <div id="clock-result" class="result-box hidden"></div>
+      </section>
+
       <section class="card capacity-card" id="capacity-card">
         <div class="jar-head">
           <h2>🎚️ 容量压力模拟</h2>
@@ -198,6 +216,7 @@
         <li><strong>发送限制：</strong><code>Strict</code> 仅同站发送；显式 <code>Lax</code> 仅同站或跨站顶层导航的安全方法（GET/HEAD/OPTIONS/TRACE）发送；<strong>默认 Lax</strong> 额外允许创建不超过 <strong>120 秒</strong>的跨站顶层 POST；<code>None</code> 跨站照常发送（已强制 Secure）。</li>
         <li><strong>屏蔽第三方 Cookie（可选，默认关闭）：</strong>界面开关与 <code>/api/store</code>、<code>/api/send</code> 的 <code>blockThirdParty</code> 参数一一对应。开启后<strong>必须提供有效顶层页面 URL</strong>，按 scheme + 可注册域判定它与响应/请求 URL 是否跨站：<strong>跨站响应拒绝写入和删除普通 Cookie</strong>（不改动罐、不触发容量淘汰），Partitioned 分区项仍按既有 Secure 与分区键规则处理；<strong>跨站请求排除普通 Cookie</strong>（被排除条目不刷新最近访问时间），分区键匹配的 Partitioned 项仍可发送。拒绝/排除结果逐项说明策略原因。</li>
         <li><strong>document.cookie 脚本演算（右栏「📜 document.cookie 演算」面板，对应 <code>/api/script/read</code>、<code>/api/script/write</code>）：</strong>模拟页面 JS 视角。<strong>读取</strong>按既有 过期 → 分区（Partitioned 分区键）→ 第三方屏蔽 → Domain → Path → Secure 顺序筛选，<strong>最后再排除 HttpOnly</strong>（<code>document.cookie</code> 对脚本不可见）；<strong>不应用 SameSite</strong>，且<strong>不刷新最近访问时间</strong>（纯只读、罐内容不变）；可读项沿用请求头排序（Path 长度降序、创建序号升序），逐项给出可读/不可读原因，并以 <code>; </code> 拼成 <code>document.cookie</code> 字符串。<strong>写入</strong>复用既有解析、分区身份与容量逻辑，但<strong>拒绝带 HttpOnly 的赋值</strong>，也<strong>拒绝覆盖或以 Max-Age&lt;=0 删除同身份（name、domain、path、分区键相同）且未过期的 HttpOnly 项</strong>；已过期的 HttpOnly 项不在保护之列。脚本专属拒绝都在改动罐之前返回，<strong>罐内容、时间戳与容量均不变</strong>。<strong>网络接口 <code>/api/store</code>、<code>/api/send</code> 行为不变</strong>，仍可写入、更新、删除并在请求头中发送 HttpOnly 项。</li>
+        <li><strong>演算时钟（右栏「⏱ 演算时钟」面板，对应 <code>GET /api/clock</code>、<code>POST /api/clock/advance</code>）：</strong>服务启动时固定当前真实时间为演算时钟起点，之后<strong>不随真实时间流动</strong>，只能按<strong>正整数秒</strong>推进；非法输入（0、负数、非整数、非数字）被拒绝且<strong>时钟与罐均不变</strong>。网络写入/发送、document.cookie 读写、罐快照与容量淘汰统一使用该时钟——Max-Age 过期、默认 Lax 的 120 秒跨站顶层 POST 宽限、过期清理都可逐步复现。<strong>推进本身不删除条目</strong>：过期项留在罐中标灰展示，下次匹配或容量淘汰时再按既有规则处理；<strong>重置罐时时钟同步回到启动时刻</strong>。</li>
         <li><strong>排序：</strong>发送时按 Path 长度降序，Path 等长时按首次创建顺序升序，再以 <code>; </code> 拼接成 Cookie 头。</li>
       </ul>
     </details>
